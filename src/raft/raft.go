@@ -3,7 +3,6 @@ package raft
 import (
 	"math/rand"
 	"sort"
-
 	"sync"
 	"sync/atomic"
 	"time"
@@ -123,8 +122,6 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	go rf.heartbeatTimeoutChecker()
-	rf.lastHeartBeat = time.Now()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.FirstIndex = -1
@@ -136,6 +133,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		rf.currentTerm = args.Term
 	}
+	go rf.heartbeatTimeoutChecker()
+	rf.lastHeartBeat = time.Now()
 
 	if args.PrevLogIndex > len(rf.logs) || args.PrevLogIndex > 0 && rf.logs[args.PrevLogIndex-1].Term != args.PrevLogTerm {
 		var startIndex int
@@ -193,6 +192,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		rf.mu.Lock()
 		if reply.VoteGranted {
 			rf.votesReceived++
+		} else {
+			if reply.Term > rf.currentTerm {
+				rf.currentTerm = reply.Term
+			}
 		}
 		rf.mu.Unlock()
 		return
@@ -200,7 +203,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) heartbeatTimeoutChecker() {
-	sleepTime := rand.Intn(500) + 300
+	sleepTime := rand.Intn(400) + 200
 	time.Sleep(time.Duration(sleepTime) * time.Millisecond)
 	if rf.killed() {
 		return
@@ -211,6 +214,7 @@ func (rf *Raft) heartbeatTimeoutChecker() {
 	rf.mu.RUnlock()
 	if time.Since(lastHeartBeat) > time.Duration(sleepTime)*time.Millisecond && time.Since(lastVoteGranted) > time.Duration(sleepTime)*time.Millisecond {
 		rf.callElection()
+
 	}
 }
 
@@ -246,7 +250,7 @@ func (rf *Raft) callElection() {
 }
 
 func (rf *Raft) electionTimeoutChecker() {
-	sleepTime := rand.Intn(500) + 300
+	sleepTime := rand.Intn(400) + 200
 	time.Sleep(time.Duration(sleepTime) * time.Millisecond)
 	if rf.killed() {
 		return
@@ -259,6 +263,8 @@ func (rf *Raft) electionTimeoutChecker() {
 		rf.elected()
 	} else if isCandidate {
 		rf.callElection()
+	} else {
+		go rf.heartbeatTimeoutChecker()
 	}
 }
 
