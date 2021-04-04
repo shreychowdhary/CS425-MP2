@@ -1,8 +1,6 @@
 package raft
 
 import (
-	"fmt"
-	"log"
 	"math/rand"
 	"sort"
 
@@ -129,6 +127,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.lastHeartBeat = time.Now()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
+		reply.FirstIndex = -1
 		reply.Success = false
 		return
 	} else {
@@ -138,8 +137,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 	}
 
-	if args.PrevLogIndex > len(rf.logs) || (args.PrevLogIndex > 0 && rf.logs[args.PrevLogIndex-1].Term != args.PrevLogTerm) {
-		reply.Term = rf.currentTerm
+	if args.PrevLogIndex > len(rf.logs) || args.PrevLogIndex > 0 && rf.logs[args.PrevLogIndex-1].Term != args.PrevLogTerm {
+		var startIndex int
+		if args.PrevLogIndex > len(rf.logs) {
+			_, term := rf.lastLogInfo()
+			reply.Term = term
+			startIndex = len(rf.logs)
+		} else {
+			reply.Term = rf.logs[args.PrevLogIndex-1].Term
+			startIndex = args.PrevLogIndex
+		}
+		reply.FirstIndex = 1
+		for i := startIndex; i > 0; i-- {
+			if rf.logs[i-1].Term != reply.Term {
+				reply.FirstIndex = i + 1
+				break
+			}
+		}
 		reply.Success = false
 		return
 	}
@@ -325,28 +339,33 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 		ok = rf.peers[server].Call("Raft.AppendEntries", args, &reply)
 		rf.mu.Lock()
 		if reply.Success {
-			rf.matchIndex[server] = args.PrevLogIndex + 1
-			rf.nextIndex[server]++
-			majorityIndex := rf.commitIndex
+			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+			rf.nextIndex[server] = rf.matchIndex[server] + 1
 			vals := make([]int, len(rf.matchIndex))
 			copy(vals, rf.matchIndex)
 			sort.Ints(vals)
+			majorityIndex := vals[len(vals)/2]
 			if len(vals)%2 == 0 {
-				majorityIndex = rf.matchIndex[len(vals)/2-1]
-			} else {
-				majorityIndex = rf.matchIndex[len(vals)/2]
+				majorityIndex = vals[len(vals)/2-1]
 			}
-
 			if majorityIndex > rf.commitIndex && rf.logs[majorityIndex-1].Term == rf.currentTerm {
 				rf.commitIndex = majorityIndex
-				log.Println(fmt.Sprintf("Commited:%d", rf.commitIndex))
 				for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 					rf.applyChan <- ApplyMsg{true, rf.logs[i-1].Command, i}
 				}
 			}
-
 		} else {
-			// Setup rewinding
+			if reply.FirstIndex > 0 {
+				args.PrevLogIndex = reply.FirstIndex - 1
+				args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+				args.Entries = []Log{}
+				for i := args.PrevLogIndex + 1; i <= rf.matchIndex[rf.me]; i++ {
+					args.Entries = append(args.Entries, rf.logs[i-1])
+				}
+			} else {
+				rf.mu.Unlock()
+				return
+			}
 		}
 		rf.mu.Unlock()
 	}
